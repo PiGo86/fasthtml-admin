@@ -1,7 +1,7 @@
 [project]
 name = "fasthtml-admin"
 version = "0.1.0"
-description = "Add your description here"
+description = "Providing helper user management and authentication functions for FastHTML"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,8 +9,6 @@ dependencies = [
     "python-fasthtml>=0.12.1",
 ]
 
-[project.scripts]
-hello = "fasthtml_admin:hello"
 
 [build-system]
 requires = ["hatchling"]
