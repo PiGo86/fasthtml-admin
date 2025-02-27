@@ -27,6 +27,9 @@ class UserCredential:
     """
     Basic user credential class for authentication.
     This class is designed to work with FastHTML's database system.
+    
+    This class can be extended by creating a subclass with additional fields
+    before passing it to the UserManager constructor.
     """
     email: str  # Primary key
     id: str
@@ -101,21 +104,24 @@ class UserManager:
     """
     Manages user authentication, registration, and related operations.
     """
-    def __init__(self, db_or_store, table_name="user_credentials", validation_mgr=None):
+    def __init__(self, db_or_store, user_class=UserCredential, table_name="user_credentials", validation_mgr=None):
         """
         Initialize the UserManager with either a FastHTML database or a dictionary store.
         
         Args:
             db_or_store: Either a FastHTML database instance or a dictionary for storing users
+            user_class: The user class to use (default: UserCredential)
+                        This can be a subclass of UserCredential with additional fields
             table_name: Name of the table to use if db_or_store is a FastHTML database
             validation_mgr: Optional ValidationManager instance for custom validation
         """
         self.is_db = hasattr(db_or_store, 'create')
+        self.user_class = user_class
         
         if self.is_db:
             # Using FastHTML database
             self.db = db_or_store
-            self.users = self.db.create(UserCredential, pk="email", name=table_name)
+            self.users = self.db.create(user_class, pk="email", name=table_name)
         else:
             # Using dictionary store
             self.users = db_or_store
@@ -162,7 +168,7 @@ class UserManager:
         """
         return self.validation_manager.validate("passwords_match", password, confirm_password)
     
-    def create_user(self, email, password, min_password_score=50, validate=True):
+    def create_user(self, email, password, min_password_score=50, validate=True, **additional_fields):
         """
         Create a new user with the given email and password.
         
@@ -171,6 +177,8 @@ class UserManager:
             password: Plain text password to be hashed
             min_password_score: Minimum acceptable password score (0-100)
             validate: Whether to validate email and password
+            **additional_fields: Additional fields to include in the user object
+                                These must match fields defined in the user_class
             
         Returns:
             The created user object
@@ -216,8 +224,12 @@ class UserManager:
             "pwd": hashed_pwd,
             "created_at": datetime.now(),
             "is_confirmed": False,
-            "is_admin": False
+            "is_admin": False,
+            "last_login": None
         }
+        
+        # Add any additional fields
+        user_data.update(additional_fields)
         
         if self.is_db:
             # Insert into FastHTML database

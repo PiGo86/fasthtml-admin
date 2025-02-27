@@ -225,6 +225,42 @@ admin_password = "adminpass"
 admin_manager.ensure_admin(admin_email, admin_password)
 ```
 
+### Extending the User Class
+
+You can extend the basic `UserCredential` class with your own fields:
+
+```python
+from dataclasses import dataclass
+from fasthtml_admin import UserCredential, UserManager
+
+@dataclass
+class ExtendedUser(UserCredential):
+    """
+    Extended user class with additional fields.
+    """
+    first_name: str = ""
+    last_name: str = ""
+    phone: str = ""
+    bio: str = ""
+    profile_image: str = ""
+
+# Initialize UserManager with the extended user class
+user_manager = UserManager(db, user_class=ExtendedUser)
+
+# Create a user with additional fields
+user = user_manager.create_user(
+    email="user@example.com",
+    password="secure_password",
+    first_name="John",
+    last_name="Doe",
+    phone="555-123-4567",
+    bio="A short bio about the user",
+    profile_image="https://example.com/profile.jpg"
+)
+```
+
+This allows you to store additional user information in the database without having to create and manage separate tables.
+
 ### Step 3: Set Up Authentication with Beforeware
 
 ```python

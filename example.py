@@ -13,6 +13,7 @@ import os
 import secrets
 import re
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from fasthtml.common import *
 
 # Import our library
@@ -25,6 +26,18 @@ from fasthtml_admin import (
     get_current_user,
     validation_manager
 )
+
+# Create an extended user class with additional fields
+@dataclass
+class ExtendedUser(UserCredential):
+    """
+    Extended user class with additional fields.
+    """
+    first_name: str = ""
+    last_name: str = ""
+    phone: str = ""
+    bio: str = ""
+    profile_image: str = ""
 
 # Create a database
 db_path = "data"
@@ -64,8 +77,8 @@ def validate_username(username: str) -> tuple[bool, str]:
 # Register the custom validator
 validation_manager.register_validator("username", validate_username)
 
-# Initialize UserManager with our database
-user_manager = UserManager(db)
+# Initialize UserManager with our database and extended user class
+user_manager = UserManager(db, user_class=ExtendedUser)
 
 # Initialize AdminManager with our UserManager
 admin_manager = AdminManager(user_manager)
@@ -244,6 +257,44 @@ def get_advanced_register(session):
             cls="form-group"
         ),
         
+        # Additional fields from ExtendedUser
+        H2("Profile Information"),
+        
+        # First Name
+        Div(
+            Label("First Name", 
+                  Input(name="first_name", placeholder="First Name")),
+            cls="form-group"
+        ),
+        
+        # Last Name
+        Div(
+            Label("Last Name", 
+                  Input(name="last_name", placeholder="Last Name")),
+            cls="form-group"
+        ),
+        
+        # Phone
+        Div(
+            Label("Phone", 
+                  Input(name="phone", placeholder="Phone Number")),
+            cls="form-group"
+        ),
+        
+        # Bio
+        Div(
+            Label("Bio", 
+                  Textarea(name="bio", placeholder="Tell us about yourself", rows=3)),
+            cls="form-group"
+        ),
+        
+        # Profile Image URL
+        Div(
+            Label("Profile Image URL", 
+                  Input(name="profile_image", placeholder="URL to your profile image")),
+            cls="form-group"
+        ),
+        
         Button("Register", type="submit", id="register-button", disabled=True),
         P(A("Already have an account? Login", href="/login")),
         
@@ -323,7 +374,9 @@ def validate_passwords_match_endpoint(password: str, confirm_password: str):
     )
 
 @app.post("/advanced-register")
-def post_advanced_register(username: str, email: str, password: str, confirm_password: str):
+def post_advanced_register(username: str, email: str, password: str, confirm_password: str, 
+                          first_name: str = "", last_name: str = "", phone: str = "", 
+                          bio: str = "", profile_image: str = ""):
     try:
         # Validate username
         is_valid_username, username_message = validation_manager.validate("username", username)
@@ -361,8 +414,16 @@ def post_advanced_register(username: str, email: str, password: str, confirm_pas
                 cls="error"
             )
         
-        # Create user
-        user = user_manager.create_user(email, password)
+        # Create user with additional fields
+        user = user_manager.create_user(
+            email, 
+            password,
+            first_name=first_name,
+            last_name=last_name,
+            phone=phone,
+            bio=bio,
+            profile_image=profile_image
+        )
         
         # Generate confirmation token
         token = user_manager.generate_confirmation_token(email, confirm_tokens)
@@ -495,15 +556,57 @@ def dashboard(session):
     user = get_current_user(session, user_manager)
     # The auth_before Beforeware will handle redirecting if not logged in
     
-    email = user.email if user_manager.is_db else user["email"]
-    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
+    # Get user information
+    if user_manager.is_db:
+        email = user.email
+        is_admin = user.is_admin
+        first_name = user.first_name
+        last_name = user.last_name
+        phone = user.phone
+        bio = user.bio
+        profile_image = user.profile_image
+    else:
+        email = user["email"]
+        is_admin = user["is_admin"]
+        first_name = user.get("first_name", "")
+        last_name = user.get("last_name", "")
+        phone = user.get("phone", "")
+        bio = user.get("bio", "")
+        profile_image = user.get("profile_image", "")
+    
+    # Create user profile section
+    profile_section = Div(
+        H2("Your Profile"),
+        Div(
+            Div(
+                Img(src=profile_image if profile_image else "https://via.placeholder.com/150", 
+                    alt="Profile Image", width="150", height="150", style="border-radius: 50%;"),
+                style="margin-right: 2rem;"
+            ),
+            Div(
+                H3(f"{first_name} {last_name}" if first_name or last_name else email),
+                P(f"Email: {email}"),
+                P(f"Phone: {phone}") if phone else None,
+                H4("Bio:"),
+                P(bio) if bio else P("No bio provided."),
+                style="flex: 1;"
+            ),
+            style="display: flex; margin-bottom: 2rem;"
+        ),
+        A("Edit Profile", href="/edit-profile", cls="button"),
+        style="margin-bottom: 2rem;"
+    )
     
     return Container(
         H1("Dashboard"),
-        P(f"Welcome to your dashboard, {email}!"),
+        P(f"Welcome to your dashboard, {first_name or email}!"),
         P("This is a protected page that only logged-in users can access."),
-        A("Logout", href="/logout", cls="button secondary"),
-        A("Admin Panel", href="/admin", cls="button secondary") if is_admin else None
+        profile_section,
+        Div(
+            A("Logout", href="/logout", cls="button secondary"),
+            A("Admin Panel", href="/admin", cls="button secondary") if is_admin else None,
+            style="margin-top: 2rem;"
+        )
     )
 
 @app.get("/admin")
@@ -672,6 +775,106 @@ async def post_upload_db(req, session):
             H1("Upload Failed"),
             P(f"Error: {str(e)}"),
             A("Try Again", href="/admin/upload-db", cls="button")
+        )
+
+@app.get("/edit-profile")
+def get_edit_profile(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
+    
+    # Get user information
+    if user_manager.is_db:
+        email = user.email
+        first_name = user.first_name
+        last_name = user.last_name
+        phone = user.phone
+        bio = user.bio
+        profile_image = user.profile_image
+    else:
+        email = user["email"]
+        first_name = user.get("first_name", "")
+        last_name = user.get("last_name", "")
+        phone = user.get("phone", "")
+        bio = user.get("bio", "")
+        profile_image = user.get("profile_image", "")
+    
+    form = Form(
+        H1("Edit Profile"),
+        P(f"Email: {email}"),
+        
+        # First Name
+        Div(
+            Label("First Name", 
+                  Input(name="first_name", placeholder="First Name", value=first_name)),
+            cls="form-group"
+        ),
+        
+        # Last Name
+        Div(
+            Label("Last Name", 
+                  Input(name="last_name", placeholder="Last Name", value=last_name)),
+            cls="form-group"
+        ),
+        
+        # Phone
+        Div(
+            Label("Phone", 
+                  Input(name="phone", placeholder="Phone Number", value=phone)),
+            cls="form-group"
+        ),
+        
+        # Bio
+        Div(
+            Label("Bio", 
+                  Textarea(name="bio", placeholder="Tell us about yourself", rows=3, value=bio)),
+            cls="form-group"
+        ),
+        
+        # Profile Image URL
+        Div(
+            Label("Profile Image URL", 
+                  Input(name="profile_image", placeholder="URL to your profile image", value=profile_image)),
+            cls="form-group"
+        ),
+        
+        Button("Update Profile", type="submit"),
+        A("Cancel", href="/dashboard", cls="button secondary"),
+        action="/edit-profile",
+        method="post"
+    )
+    
+    return Container(form)
+
+@app.post("/edit-profile")
+def post_edit_profile(first_name: str = "", last_name: str = "", phone: str = "", 
+                     bio: str = "", profile_image: str = "", session=None):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
+    
+    try:
+        # Update user profile
+        if user_manager.is_db:
+            # Update FastHTML database object
+            user.first_name = first_name
+            user.last_name = last_name
+            user.phone = phone
+            user.bio = bio
+            user.profile_image = profile_image
+            user_manager.users.update(user)
+        else:
+            # Update dictionary store
+            user["first_name"] = first_name
+            user["last_name"] = last_name
+            user["phone"] = phone
+            user["bio"] = bio
+            user["profile_image"] = profile_image
+        
+        return RedirectResponse("/dashboard", status_code=303)
+    except Exception as e:
+        return Container(
+            H1("Profile Update Failed"),
+            P(f"Error: {str(e)}"),
+            A("Try Again", href="/edit-profile", cls="button")
         )
 
 serve(host="localhost", port=8000)
