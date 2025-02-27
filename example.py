@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from fasthtml.common import *
 
 # Import our library
-from fasthtml_admin import UserManager, UserCredential, AdminManager
+from fasthtml_admin import UserManager, UserCredential, AdminManager, ConfirmToken
 
 # Create a FastHTML app
 app, rt = fast_app()
@@ -28,13 +28,6 @@ if not os.path.exists(db_path):
 db = database(os.path.join(db_path, "example.db"))
 
 # Create a token store for confirmation tokens
-@dataclass
-class ConfirmToken:
-    token: str
-    email: str
-    expiry: datetime
-    is_used: bool = False
-
 confirm_tokens = db.create(ConfirmToken, pk="token")
 
 # Initialize UserManager with our database
@@ -313,6 +306,7 @@ def admin_panel(req):
         H2("Database Management"),
         Div(
             A("Backup Database", href="/admin/backup-db", cls="button"),
+            A("Download Database", href="/admin/download-db", cls="button"),
             A("Upload Database", href="/admin/upload-db", cls="button secondary"),
             style="display: flex; gap: 1rem;"
         ),
@@ -346,6 +340,45 @@ def backup_db(req):
     except Exception as e:
         return Container(
             H1("Backup Failed"),
+            P(f"Error: {str(e)}"),
+            A("Go to Admin Panel", href="/admin", cls="button")
+        )
+
+@app.get("/admin/download-db")
+def download_db(req):
+    user = get_current_user(req)
+    if not user:
+        return RedirectResponse("/login")
+    
+    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
+    if not is_admin:
+        return Container(
+            H1("Access Denied"),
+            P("You do not have permission to access this page."),
+            A("Go to Dashboard", href="/dashboard", cls="button")
+        )
+    
+    try:
+        db_file_path = os.path.join(db_path, "example.db")
+        
+        # Check if the file exists
+        if not os.path.exists(db_file_path):
+            return Container(
+                H1("Download Failed"),
+                P("Database file not found."),
+                A("Go to Admin Panel", href="/admin", cls="button")
+            )
+        
+        # Return the file as a download
+        filename = os.path.basename(db_file_path)
+        return FileResponse(
+            path=db_file_path,
+            filename=filename,
+            media_type="application/octet-stream"
+        )
+    except Exception as e:
+        return Container(
+            H1("Download Failed"),
             P(f"Error: {str(e)}"),
             A("Go to Admin Panel", href="/admin", cls="button")
         )

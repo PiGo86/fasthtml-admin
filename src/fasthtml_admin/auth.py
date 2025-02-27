@@ -3,12 +3,23 @@ Authentication module for the fasthtml_admin library.
 """
 
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Optional
 from fasthtml.common import database
 
 from .utils import hash_password, verify_password, generate_token
+
+@dataclass
+class ConfirmToken:
+    """
+    Token for email confirmation.
+    This class is designed to work with FastHTML's database system.
+    """
+    token: str  # Primary key
+    email: str
+    expiry: datetime
+    is_used: bool = False
 
 @dataclass
 class UserCredential:
