@@ -39,9 +39,11 @@ class UserCredential:
     is_admin: bool = False
     last_login: Optional[datetime] = None
 
-def auth_before(req, sess, user_manager, login_url='/login', public_paths=None):
+def auth_before(req, sess, user_manager, login_url='/login', public_paths=None, 
+               admin_manager=None, maintenance_url='/maintenance'):
     """
     Authentication Beforeware function for FastHTML.
+    If maintenance mode is enabled, redirects non-admin users to maintenance page.
     Checks if user is authenticated and redirects to login page if not.
     
     Args:
@@ -50,15 +52,59 @@ def auth_before(req, sess, user_manager, login_url='/login', public_paths=None):
         user_manager: An instance of UserManager
         login_url: URL to redirect to if not authenticated
         public_paths: List of paths that don't require authentication
+        admin_manager: Optional AdminManager instance to check for maintenance mode
+        maintenance_url: URL to redirect to if in maintenance mode
         
     Returns:
-        RedirectResponse if not authenticated, None otherwise
+        RedirectResponse if not authenticated or in maintenance mode, None otherwise
     """
     if public_paths is None:
         public_paths = ['/', '/login', '/register', '/confirm-email']
     
-    # Skip authentication for public routes
+    # Always allow access to maintenance page and login page
+    if maintenance_url and maintenance_url not in public_paths:
+        public_paths.append(maintenance_url)
+    if login_url and login_url not in public_paths:
+        public_paths.append(login_url)
+    
     path = req.url.path
+    
+    # Check for maintenance mode first (before authentication)
+    if admin_manager and admin_manager.is_maintenance_mode():
+        # Always allow access to maintenance page and login page
+        if path == maintenance_url or path == login_url:
+            pass
+        # Check if user is authenticated and is an admin
+        elif 'user_id' in sess:
+            user_id = sess.get('user_id')
+            # Find user to check if they're an admin
+            users = user_manager.users
+            is_admin = False
+            
+            if user_manager.is_db:
+                # Using FastHTML database
+                for user in users():
+                    if user.id == user_id:
+                        is_admin = user.is_admin
+                        break
+            else:
+                # Using dictionary store
+                for user in users.values():
+                    if user["id"] == user_id:
+                        is_admin = user.get("is_admin", False)
+                        break
+            
+            # If admin, allow access and store auth info
+            if is_admin:
+                req.scope['auth'] = user_id
+            else:
+                # Non-admin user, redirect to maintenance page
+                return RedirectResponse(maintenance_url, status_code=303)
+        else:
+            # Not logged in, redirect to maintenance page
+            return RedirectResponse(maintenance_url, status_code=303)
+    
+    # Skip authentication for public routes
     if path in public_paths or any(path.startswith(p) for p in public_paths if p.endswith('/')):
         return
     
@@ -67,7 +113,8 @@ def auth_before(req, sess, user_manager, login_url='/login', public_paths=None):
         return RedirectResponse(login_url, status_code=303)
     
     # Store auth info in request scope for easy access
-    req.scope['auth'] = sess.get('user_id')
+    user_id = sess.get('user_id')
+    req.scope['auth'] = user_id
 
 
 def get_current_user(sess, user_manager):

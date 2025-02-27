@@ -83,6 +83,9 @@ user_manager = UserManager(db, user_class=ExtendedUser)
 # Initialize AdminManager with our UserManager
 admin_manager = AdminManager(user_manager)
 
+# You can enable maintenance mode by default if needed
+# admin_manager.set_maintenance_mode(True)
+
 # Create an admin user if environment variables are provided
 admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com")
 admin_password = os.environ.get("ADMIN_PASSWORD", "adminpass")
@@ -92,7 +95,9 @@ admin_manager.ensure_admin(admin_email, admin_password)
 def app_auth_before(req, sess):
     return auth_before(req, sess, user_manager, 
                       login_url='/login',
-                      public_paths=['/', '/login', '/register', '/advanced-register', '/confirm-email', '/confirm-email/'])
+                      public_paths=['/', '/login', '/register', '/advanced-register', '/confirm-email', '/confirm-email/'],
+                      admin_manager=admin_manager,
+                      maintenance_url='/maintenance')
 
 # Fake email sending function
 def send_confirmation_email(email, token):
@@ -622,10 +627,30 @@ def admin_panel(session):
             A("Go to Dashboard", href="/dashboard", cls="button")
         )
     
+    # Get maintenance mode status
+    maintenance_mode = admin_manager.is_maintenance_mode()
+    
     return Container(
         H1("Admin Panel"),
         P("Welcome to the admin panel!"),
         P("This is a protected page that only admin users can access."),
+        
+        H2("System Management"),
+        Div(
+            Form(
+                Input(type="hidden", name="enabled", value=str(not maintenance_mode).lower()),
+                Button(
+                    "Disable Maintenance Mode" if maintenance_mode else "Enable Maintenance Mode", 
+                    type="submit",
+                    cls="button " + ("primary" if not maintenance_mode else "secondary")
+                ),
+                action="/admin/maintenance-mode",
+                method="post"
+            ),
+            P(f"Maintenance Mode is currently {'enabled' if maintenance_mode else 'disabled'}."),
+            style="margin-bottom: 2rem;"
+        ),
+        
         H2("Database Management"),
         Div(
             A("Backup Database", href="/admin/backup-db", cls="button"),
@@ -635,6 +660,41 @@ def admin_panel(session):
         ),
         A("Go to Dashboard", href="/dashboard", cls="button secondary"),
         A("Logout", href="/logout", cls="button secondary")
+    )
+
+@app.post("/admin/maintenance-mode")
+def toggle_maintenance_mode(enabled: str, session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
+    
+    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
+    if not is_admin:
+        return Container(
+            H1("Access Denied"),
+            P("You do not have permission to access this page."),
+            A("Go to Dashboard", href="/dashboard", cls="button")
+        )
+    
+    # Convert string to boolean
+    enable_mode = enabled.lower() == "true"
+    
+    # Set maintenance mode
+    admin_manager.set_maintenance_mode(enable_mode)
+    
+    return RedirectResponse("/admin", status_code=303)
+
+@app.get("/maintenance")
+def maintenance_page():
+    """
+    Maintenance page shown to non-admin users when maintenance mode is enabled.
+    """
+    return Container(
+        H1("System Maintenance"),
+        P("The system is currently undergoing maintenance."),
+        P("Please check back later."),
+        P("If you are an administrator, please log in to access the system."),
+        A("Login", href="/login", cls="button"),
+        style="text-align: center; max-width: 600px; margin: 0 auto; padding: 2rem;"
     )
 
 @app.get("/admin/backup-db")
@@ -720,7 +780,7 @@ def get_upload_db(session):
     form = Form(
         H1("Upload Database"),
         P("Warning: This will replace the current database with the uploaded file."),
-        Input(name="db_file", type="file", accept=".db,.bak", required=True),
+        Input(name="dbfile", type="file", accept=".db", required=True),
         Button("Upload", type="submit"),
         A("Cancel", href="/admin", cls="button secondary"),
         action="/admin/upload-db",
@@ -731,7 +791,7 @@ def get_upload_db(session):
     return Container(form)
 
 @app.post("/admin/upload-db")
-async def post_upload_db(req, session):
+async def post_upload_db(request, session):
     user = get_current_user(session, user_manager)
     # The auth_before Beforeware will handle redirecting if not logged in
     
@@ -744,38 +804,22 @@ async def post_upload_db(req, session):
         )
     
     try:
-        form = await req.form()
-        db_file = form.get("db_file")
+        # Process form data
+        form = await request.form()
+        file = form["dbfile"]
+        if not file.filename.endswith('.db'):
+            return Titled("Error", P("Invalid file type. Please upload a .db file."))
         
-        if not db_file:
-            return Container(
-                H1("Upload Failed"),
-                P("No file selected."),
-                A("Try Again", href="/admin/upload-db", cls="button")
-            )
+        # Use AdminManager to upload database
+        file_content = await file.read()
+        admin_manager.upload_database(os.path.join(db_path, "example.db"), file_content)
         
-        # Save uploaded file to temporary location
-        temp_path = os.path.join(db_path, "temp_upload.db")
-        with open(temp_path, "wb") as f:
-            f.write(await db_file.read())
-        
-        # Restore database from temporary file
-        admin_manager.restore_database(os.path.join(db_path, "example.db"), temp_path)
-        
-        # Remove temporary file
-        os.remove(temp_path)
-        
-        return Container(
-            H1("Database Upload"),
-            P("Database uploaded and restored successfully."),
-            A("Go to Admin Panel", href="/admin", cls="button")
-        )
+        return RedirectResponse("/admin?success=true", status_code=303)
+            
+    except ValueError as e:
+        return Titled("Error", P(str(e)))
     except Exception as e:
-        return Container(
-            H1("Upload Failed"),
-            P(f"Error: {str(e)}"),
-            A("Try Again", href="/admin/upload-db", cls="button")
-        )
+        return Titled("Error", P(f"Failed to process upload request: {str(e)}"))
 
 @app.get("/edit-profile")
 def get_edit_profile(session):
@@ -877,4 +921,9 @@ def post_edit_profile(first_name: str = "", last_name: str = "", phone: str = ""
             A("Try Again", href="/edit-profile", cls="button")
         )
 
-serve(host="localhost", port=8000)
+
+if __name__ == "__main__":
+    print("\nStarting example server...")
+    print("Admin user created with email:", admin_email)
+    print("Admin user password:", admin_password)
+    serve(host="localhost", port=8000)

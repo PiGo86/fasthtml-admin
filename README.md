@@ -4,13 +4,11 @@ A Python library for user authentication, admin management, and database adminis
 
 - User management (registration, authentication, and confirmation)
 - Admin user creation and management
-- Database backup and restore
-- Works with both FastHTML database and dictionary stores
-- FastHTML best practices for session handling and authentication
+- Sqlite database download, upload, backup and restore
 - Built-in validation functions for passwords, emails, and more
 - Extensible validation system for custom validation rules
 - HTMX integration for real-time form validation
-- OAuth integration for third-party authentication
+- OAuth integration 
 
 ## Installation
 
@@ -108,6 +106,12 @@ print(f"Database backed up to: {backup_path}")
 # Restore the database from a backup
 admin_manager.restore_database("data/myapp.db", backup_path)
 print("Database restored successfully")
+
+# Upload a database file
+with open("path/to/uploaded_file.db", "rb") as f:
+    file_content = f.read()
+    admin_manager.upload_database("data/myapp.db", file_content)
+print("Database uploaded successfully")
 ```
 
 ### Email Confirmation
@@ -761,6 +765,171 @@ It works with any OAuth provider supported by FastHTML, including:
 - Auth0
 
 For a complete example, see `example_oauth.py`.
+
+## Maintenance Mode
+
+The library includes a persistent maintenance mode feature that allows administrators to temporarily restrict access to the system for all non-admin users. When maintenance mode is enabled, non-admin users (including anonymous users) are redirected to a maintenance page.
+
+```python
+from fasthtml.common import *
+from fasthtml_admin import UserManager, AdminManager, auth_before
+
+# Initialize UserManager and AdminManager
+db = database("data/myapp.db")
+user_manager = UserManager(db)
+admin_manager = AdminManager(user_manager)
+
+# Set up authentication with maintenance mode support
+def app_auth_before(req, sess):
+    return auth_before(req, sess, user_manager, 
+                      login_url='/login',
+                      public_paths=['/', '/register'],
+                      admin_manager=admin_manager,
+                      maintenance_url='/maintenance')
+
+# Create a FastHTML app with authentication
+beforeware = Beforeware(app_auth_before)
+app, rt = fast_app(
+    secret_key="your-secret-key-here",
+    before=beforeware,
+    session_cookie="session"
+)
+
+# Add a maintenance page
+@app.get("/maintenance")
+def maintenance_page():
+    return Container(
+        H1("System Maintenance"),
+        P("The system is currently undergoing maintenance."),
+        P("Please check back later."),
+        P("If you are an administrator, please log in to access the system."),
+        A("Login", href="/login", cls="button")
+    )
+
+# Add controls for admins to toggle maintenance mode
+@app.post("/admin/maintenance-mode")
+def toggle_maintenance_mode(enabled: str, session):
+    user = get_current_user(session, user_manager)
+    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
+    
+    if not is_admin:
+        return RedirectResponse("/dashboard", status_code=303)
+    
+    # Convert string to boolean
+    enable_mode = enabled.lower() == "true"
+    
+    # Set maintenance mode
+    admin_manager.set_maintenance_mode(enable_mode)
+    
+    return RedirectResponse("/admin", status_code=303)
+```
+
+This example demonstrates:
+1. Setting up the AdminManager with maintenance mode support
+2. Configuring the auth_before function to check for maintenance mode
+3. Adding a maintenance page that users will be redirected to
+4. Adding controls for admins to toggle maintenance mode on/off
+
+When maintenance mode is enabled:
+- Admin users can still access all parts of the system
+- Non-admin users (including anonymous users) are redirected to the maintenance page when they try to access any part of the system
+- The login page remains accessible so admins can log in
+- The maintenance page is always accessible
+
+### Persistent Maintenance Mode
+
+The maintenance mode state is stored in the database, making it persistent across application restarts. This means that if you enable maintenance mode and restart your application, it will remain in maintenance mode.
+
+```python
+# Initialize AdminManager
+admin_manager = AdminManager(user_manager)
+
+# Check current maintenance mode status
+is_maintenance = admin_manager.is_maintenance_mode()
+print(f"Maintenance mode is {'enabled' if is_maintenance else 'disabled'}")
+
+# Enable maintenance mode
+admin_manager.set_maintenance_mode(True)
+
+# Disable maintenance mode
+admin_manager.set_maintenance_mode(False)
+```
+
+The maintenance mode state is stored in a system_settings table in the database, which is automatically created when you initialize the AdminManager. This ensures that the maintenance mode state is preserved even if the application is restarted.
+
+## Database Upload Example
+
+Here's an example of how to implement a database upload feature in your FastHTML application:
+
+```python
+from fasthtml.common import limiter, RedirectResponse, Container, H1, P, A, Form, Input, Button, Titled
+
+@app.get("/admin/upload-db")
+def get_upload_db(session):
+    user = get_current_user(session, user_manager)
+    # Check if user is admin
+    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
+    if not is_admin:
+        return Container(
+            H1("Access Denied"),
+            P("You do not have permission to access this page."),
+            A("Go to Dashboard", href="/dashboard", cls="button")
+        )
+    
+    # Create upload form
+    form = Form(
+        H1("Upload Database"),
+        P("Warning: This will replace the current database with the uploaded file."),
+        Input(name="dbfile", type="file", accept=".db", required=True),
+        Button("Upload", type="submit"),
+        A("Cancel", href="/admin", cls="button secondary"),
+        action="/admin/upload-db",
+        method="post",
+        enctype="multipart/form-data"
+    )
+    
+    return Container(form)
+
+@limiter.limit("30/day")  # Rate limit to prevent abuse
+@app.post("/admin/upload-db")
+async def post_upload_db(request, session):
+    user = get_current_user(session, user_manager)
+    # Check if user is admin
+    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
+    if not is_admin:
+        return Container(
+            H1("Access Denied"),
+            P("You do not have permission to access this page."),
+            A("Go to Dashboard", href="/dashboard", cls="button")
+        )
+    
+    try:
+        # Process form data
+        form = await request.form()
+        file = form["dbfile"]
+        if not file.filename.endswith('.db'):
+            return Titled("Error", P("Invalid file type. Please upload a .db file."))
+        
+        # Use AdminManager to upload database
+        file_content = await file.read()
+        admin_manager.upload_database("data/myapp.db", file_content)
+        
+        return RedirectResponse("/admin?success=true", status_code=303)
+            
+    except ValueError as e:
+        return Titled("Error", P(str(e)))
+    except Exception as e:
+        return Titled("Error", P(f"Failed to process upload request: {str(e)}"))
+```
+
+This example demonstrates:
+1. A GET route to display the upload form
+2. A POST route to handle the file upload
+3. Rate limiting to prevent abuse
+4. Admin permission checks
+5. File validation (must be a .db file)
+6. Using the AdminManager's upload_database method to handle the upload
+7. Error handling for different types of errors
 
 ## Customization
 

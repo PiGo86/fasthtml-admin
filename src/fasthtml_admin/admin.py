@@ -6,8 +6,19 @@ import secrets
 from datetime import datetime
 import os
 import sqlite3
+from dataclasses import dataclass
 
 from .utils import hash_password
+
+@dataclass
+class SystemSetting:
+    """
+    System setting class for storing configuration values.
+    This class is designed to work with FastHTML's database system.
+    """
+    key: str  # Primary key
+    value: str
+    updated_at: datetime = None
 
 class AdminManager:
     """
@@ -21,6 +32,81 @@ class AdminManager:
             user_manager: An instance of UserManager to handle user operations
         """
         self.user_manager = user_manager
+        
+        # Create settings table if using FastHTML database
+        if self.user_manager.is_db:
+            self.settings = self.user_manager.db.create(SystemSetting, pk="key", name="system_settings")
+            
+            # Initialize maintenance mode setting if it doesn't exist
+            try:
+                self.settings["maintenance_mode"]
+            except (KeyError, IndexError, Exception) as e:
+                # Setting doesn't exist, create it
+                if not isinstance(e, Exception) or "NotFoundError" not in str(type(e)):
+                    raise  # Re-raise if it's not a NotFoundError
+                
+                self.settings.insert({
+                    "key": "maintenance_mode",
+                    "value": "false",
+                    "updated_at": datetime.now()
+                })
+        else:
+            # Using dictionary store
+            # Initialize settings dictionary if it doesn't exist
+            if not hasattr(self.user_manager, "settings"):
+                self.user_manager.settings = {}
+            
+            # Initialize maintenance mode setting if it doesn't exist
+            if "maintenance_mode" not in self.user_manager.settings:
+                self.user_manager.settings["maintenance_mode"] = {
+                    "key": "maintenance_mode",
+                    "value": "false",
+                    "updated_at": datetime.now()
+                }
+    
+    def set_maintenance_mode(self, enabled):
+        """
+        Enable or disable maintenance mode.
+        
+        Args:
+            enabled: Boolean indicating whether maintenance mode should be enabled
+            
+        Returns:
+            The current maintenance mode state
+        """
+        value = "true" if enabled else "false"
+        
+        if self.user_manager.is_db:
+            # Update setting in database
+            setting = self.settings["maintenance_mode"]
+            setting.value = value
+            setting.updated_at = datetime.now()
+            self.settings.update(setting)
+        else:
+            # Update setting in dictionary store
+            self.user_manager.settings["maintenance_mode"]["value"] = value
+            self.user_manager.settings["maintenance_mode"]["updated_at"] = datetime.now()
+        
+        return enabled
+    
+    def is_maintenance_mode(self):
+        """
+        Check if the system is in maintenance mode.
+        
+        Returns:
+            Boolean indicating whether maintenance mode is enabled
+        """
+        try:
+            if self.user_manager.is_db:
+                # Get setting from database
+                setting = self.settings["maintenance_mode"]
+                return setting.value.lower() == "true"
+            else:
+                # Get setting from dictionary store
+                return self.user_manager.settings["maintenance_mode"]["value"].lower() == "true"
+        except (KeyError, IndexError, Exception) as e:
+            # Setting doesn't exist, return default value
+            return False
     
     def ensure_admin(self, admin_email, admin_password):
         """
@@ -166,4 +252,77 @@ class AdminManager:
                 except:
                     pass
             
+            raise e
+            
+    def upload_database(self, db_path, file_content):
+        """
+        Upload and replace the current database with the provided file content.
+        
+        Args:
+            db_path: Path to the target database file
+            file_content: Binary content of the uploaded database file
+            
+        Returns:
+            True if successful
+            
+        Raises:
+            ValueError: If the file is not a valid SQLite database
+            Exception: If the upload fails
+        """
+        # Create a temporary file for the uploaded content
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_path = f"{os.path.dirname(db_path)}/upload_temp_{timestamp}.db"
+        backup_path = None
+        
+        try:
+            # Save uploaded content to temporary file
+            with open(temp_path, "wb") as f:
+                f.write(file_content)
+            
+            # Verify it's a valid SQLite database
+            try:
+                temp_conn = sqlite3.connect(temp_path)
+                temp_conn.cursor().execute("SELECT name FROM sqlite_master WHERE type='table'")
+                temp_conn.close()
+            except sqlite3.Error:
+                os.remove(temp_path)
+                raise ValueError("Invalid SQLite database file.")
+            
+            # Create backup of current database using SQLite backup API
+            backup_path = f"{os.path.dirname(db_path)}/backup_{timestamp}.db"
+            source = sqlite3.connect(db_path)
+            backup = sqlite3.connect(backup_path)
+            source.backup(backup)
+            source.close()
+            backup.close()
+            
+            try:
+                # Replace current database with uploaded one using SQLite backup API
+                dest = sqlite3.connect(db_path)
+                source = sqlite3.connect(temp_path)
+                source.backup(dest)
+                source.close()
+                dest.close()
+                
+                # Clean up temporary files
+                os.remove(temp_path)
+                os.remove(backup_path)
+                
+                return True
+                
+            except Exception as e:
+                # Restore from backup if something went wrong
+                if os.path.exists(backup_path):
+                    self.restore_database(db_path, backup_path)
+                    os.remove(backup_path)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise Exception(f"Failed to upload database: {str(e)}")
+                
+        except Exception as e:
+            # Clean up temporary files
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
             raise e
