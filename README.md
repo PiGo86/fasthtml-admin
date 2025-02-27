@@ -20,7 +20,9 @@ pip install fasthtml-admin
 
 ## Usage
 
-### User Management with FastHTML Database
+For detailed usage, look at our [example application](https://github.com/AndreasThinks/fasthtml-admin/blob/main/example.py).
+
+### User Management
 
 ```python
 from fasthtml.common import database
@@ -57,30 +59,9 @@ else:
     print("User confirmation failed")
 ```
 
-### User Management with Dictionary Store
-
-```python
-from fasthtml_admin import UserManager
-
-# Create a dictionary store
-users_store = {}
-
-# Initialize UserManager with the dictionary store
-user_manager = UserManager(users_store)
-
-# Create a new user
-user = user_manager.create_user("user@example.com", "secure_password")
-print(f"User created with ID: {user['id']}")
-
-# Authenticate a user
-user = user_manager.authenticate_user("user@example.com", "secure_password")
-if user:
-    print(f"User authenticated: {user['email']}")
-else:
-    print("Authentication failed")
-```
-
 ### Admin Management
+
+You can quickly create admin users, who have elevated access.
 
 ```python
 from fasthtml.common import database
@@ -114,7 +95,9 @@ with open("path/to/uploaded_file.db", "rb") as f:
 print("Database uploaded successfully")
 ```
 
-### Email Confirmation
+### User Confirmation
+
+If you wish to confirm users (for example, using an email confirmation flow), you can create and register confirmation tokens.
 
 ```python
 from fasthtml.common import database
