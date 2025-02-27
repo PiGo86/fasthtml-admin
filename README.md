@@ -8,6 +8,10 @@ A Python library for user authentication, admin management, and database adminis
 - Admin user creation and management
 - Database backup and restore
 - Works with both FastHTML database and dictionary stores
+- FastHTML best practices for session handling and authentication
+- Built-in validation functions for passwords, emails, and more
+- Extensible validation system for custom validation rules
+- HTMX integration for real-time form validation
 
 ## Installation
 
@@ -145,6 +149,49 @@ send_confirmation_email("user@example.com", token)
 # confirm_tokens.update(confirm_token)
 ```
 
+### Authentication with Beforeware
+
+The library provides functions to implement FastHTML's best practices for authentication using Beforeware:
+
+```python
+from fasthtml.common import *
+from fasthtml_admin import UserManager, auth_before, get_current_user
+
+# Initialize UserManager
+db = database("data/myapp.db")
+user_manager = UserManager(db)
+
+# Define a custom auth_before function that uses the library's auth_before
+def app_auth_before(req, sess):
+    return auth_before(req, sess, user_manager, 
+                      login_url='/login',
+                      public_paths=['/', '/login', '/register', '/confirm-email'])
+
+# Create a FastHTML app with session support and authentication
+beforeware = Beforeware(app_auth_before)
+app, rt = fast_app(
+    secret_key="your-secret-key-here",  # In production, use a secure random key
+    before=beforeware,
+    session_cookie="session",
+    max_age=3600 * 24 * 7,  # 7 days
+    sess_path="/",
+    same_site="lax",
+    sess_https_only=False  # Set to True in production with HTTPS
+)
+
+# In your route handlers, use get_current_user to get the current user
+@app.get("/dashboard")
+def dashboard(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
+    
+    return Container(
+        H1("Dashboard"),
+        P(f"Welcome to your dashboard, {user.email}!"),
+        # ...
+    )
+```
+
 ## Integrating with Existing FastHTML Applications
 
 ### Step 1: Install the Library
@@ -177,35 +224,37 @@ admin_password = "adminpass"
 admin_manager.ensure_admin(admin_email, admin_password)
 ```
 
-### Step 3: Add Authentication Routes
+### Step 3: Set Up Authentication with Beforeware
 
 ```python
-# Simple session management
-sessions = {}
+from fasthtml.common import *
+from fasthtml_admin import auth_before, get_current_user
 
-# Helper function to check if user is logged in
-def get_current_user(req):
-    session_id = req.cookies.get("session_id")
-    if session_id and session_id in sessions:
-        user_id = sessions[session_id]
-        # Find user by ID
-        users = user_manager.users
-        if user_manager.is_db:
-            # Using FastHTML database
-            for user in users():
-                if user.id == user_id:
-                    return user
-        else:
-            # Using dictionary store
-            for user in users.values():
-                if user["id"] == user_id:
-                    return user
-    return None
+# Define a custom auth_before function that uses the library's auth_before
+def app_auth_before(req, sess):
+    return auth_before(req, sess, user_manager, 
+                      login_url='/login',
+                      public_paths=['/', '/login', '/register', '/confirm-email'])
 
-# Login route
+# Create a FastHTML app with session support and authentication
+beforeware = Beforeware(app_auth_before)
+app, rt = fast_app(
+    secret_key="your-secret-key-here",  # In production, use a secure random key
+    before=beforeware,
+    session_cookie="session",
+    max_age=3600 * 24 * 7,  # 7 days
+    sess_path="/",
+    same_site="lax",
+    sess_https_only=False  # Set to True in production with HTTPS
+)
+```
+
+### Step 4: Add Authentication Routes
+
+```python
 @app.get("/login")
-def get_login(req):
-    user = get_current_user(req)
+def get_login(session):
+    user = get_current_user(session, user_manager)
     if user:
         return RedirectResponse("/")
     
@@ -222,7 +271,7 @@ def get_login(req):
     return Container(form)
 
 @app.post("/login")
-def post_login(email: str, password: str):
+def post_login(email: str, password: str, session):
     user = user_manager.authenticate_user(email, password)
     
     if not user:
@@ -242,36 +291,29 @@ def post_login(email: str, password: str):
             A("Try Again", href="/login", cls="button")
         )
     
-    # Create session
-    session_id = secrets.token_urlsafe()
+    # Store user ID in session
     user_id = user.id if user_manager.is_db else user["id"]
-    sessions[session_id] = user_id
+    session['user_id'] = user_id
     
-    # Redirect to dashboard with session cookie
+    # Redirect to dashboard
     # Use status_code 303 to change the method from POST to GET
-    response = RedirectResponse("/dashboard", status_code=303)
-    response.set_cookie(key="session_id", value=session_id)
-    
-    return response
+    return RedirectResponse("/dashboard", status_code=303)
 
 @app.get("/logout")
-def logout(req):
-    session_id = req.cookies.get("session_id")
-    if session_id and session_id in sessions:
-        del sessions[session_id]
+def logout(session):
+    # Clear session
+    if 'user_id' in session:
+        del session['user_id']
     
-    response = RedirectResponse("/")
-    response.delete_cookie(key="session_id")
-    
-    return response
+    return RedirectResponse("/")
 ```
 
-### Step 4: Add Registration and Confirmation Routes
+### Step 5: Add Registration and Confirmation Routes
 
 ```python
 @app.get("/register")
-def get_register(req):
-    user = get_current_user(req)
+def get_register(session):
+    user = get_current_user(session, user_manager)
     if user:
         return RedirectResponse("/")
     
@@ -371,14 +413,15 @@ def confirm_email(token: str):
         )
 ```
 
-### Step 5: Add Admin Panel Routes
+### Step 6: Protect Your Routes
+
+With the auth_before Beforeware in place, your routes are automatically protected. You can still check for admin privileges or other specific conditions in your route handlers:
 
 ```python
 @app.get("/admin")
-def admin_panel(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
+def admin_panel(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
     
     is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
     if not is_admin:
@@ -388,106 +431,9 @@ def admin_panel(req):
             A("Go to Dashboard", href="/dashboard", cls="button")
         )
     
+    # Your admin panel code here
     return Container(
         H1("Admin Panel"),
-        P("Welcome to the admin panel!"),
-        P("This is a protected page that only admin users can access."),
-        H2("Database Management"),
-        Div(
-            A("Backup Database", href="/admin/backup-db", cls="button"),
-            A("Download Database", href="/admin/download-db", cls="button"),
-            A("Upload Database", href="/admin/upload-db", cls="button secondary"),
-            style="display: flex; gap: 1rem;"
-        ),
-        A("Go to Dashboard", href="/dashboard", cls="button secondary"),
-        A("Logout", href="/logout", cls="button secondary")
-    )
-
-@app.get("/admin/backup-db")
-def backup_db(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
-    
-    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
-    if not is_admin:
-        return Container(
-            H1("Access Denied"),
-            P("You do not have permission to access this page."),
-            A("Go to Dashboard", href="/dashboard", cls="button")
-        )
-    
-    try:
-        backup_path = admin_manager.backup_database("data/myapp.db")
-        
-        return Container(
-            H1("Database Backup"),
-            P("Database backup created successfully."),
-            P(f"Backup file: {backup_path}"),
-            A("Go to Admin Panel", href="/admin", cls="button")
-        )
-    except Exception as e:
-        return Container(
-            H1("Backup Failed"),
-            P(f"Error: {str(e)}"),
-            A("Go to Admin Panel", href="/admin", cls="button")
-        )
-
-@app.get("/admin/download-db")
-def download_db(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
-    
-    is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
-    if not is_admin:
-        return Container(
-            H1("Access Denied"),
-            P("You do not have permission to access this page."),
-            A("Go to Dashboard", href="/dashboard", cls="button")
-        )
-    
-    try:
-        db_file_path = "data/myapp.db"
-        
-        # Check if the file exists
-        if not os.path.exists(db_file_path):
-            return Container(
-                H1("Download Failed"),
-                P("Database file not found."),
-                A("Go to Admin Panel", href="/admin", cls="button")
-            )
-        
-        # Return the file as a download
-        filename = os.path.basename(db_file_path)
-        return FileResponse(
-            path=db_file_path,
-            filename=filename,
-            media_type="application/octet-stream"
-        )
-    except Exception as e:
-        return Container(
-            H1("Download Failed"),
-            P(f"Error: {str(e)}"),
-            A("Go to Admin Panel", href="/admin", cls="button")
-        )
-```
-
-### Step 6: Protect Your Routes
-
-Add authentication checks to your existing routes to ensure only logged-in users can access protected pages:
-
-```python
-@app.get("/dashboard")
-def dashboard(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
-    
-    # Your existing dashboard code here
-    return Container(
-        H1("Dashboard"),
-        P(f"Welcome to your dashboard, {user.email}!"),
         # ...
     )
 ```
@@ -495,11 +441,175 @@ def dashboard(req):
 ### Best Practices
 
 1. **Security**: Always store passwords securely using the provided `hash_password` function.
-2. **Sessions**: Consider using a more persistent session store for production applications.
-3. **Email Confirmation**: Implement a real email sending function for production.
-4. **Error Handling**: Add comprehensive error handling for database operations.
-5. **CSRF Protection**: Add CSRF protection for form submissions.
-6. **Rate Limiting**: Implement rate limiting for login attempts to prevent brute force attacks.
+2. **Sessions**: Use FastHTML's built-in session support with a secure random key.
+3. **Authentication**: Use the provided `auth_before` function with Beforeware for centralized authentication.
+4. **User Management**: Use the `get_current_user` function to retrieve the current user from the session.
+5. **Email Confirmation**: Implement a real email sending function for production.
+6. **Error Handling**: Add comprehensive error handling for database operations.
+7. **CSRF Protection**: Add CSRF protection for form submissions.
+8. **Rate Limiting**: Implement rate limiting for login attempts to prevent brute force attacks.
+9. **HTTPS**: In production, set `sess_https_only=True` and use HTTPS.
+
+## Validation System
+
+The library includes a robust validation system for validating user input. It provides built-in validators for common validation tasks and allows you to register custom validators.
+
+### Built-in Validators
+
+The following validators are included out of the box:
+
+1. **Password Strength Validation**
+   ```python
+   from fasthtml_admin import validation_manager
+   
+   # Returns a score (0-100) and a list of issues
+   score, issues = validation_manager.validate("password_strength", "my_password")
+   
+   # Check if password is strong enough
+   if score >= 50:
+       print("Password is strong enough")
+   else:
+       print(f"Password issues: {', '.join(issues)}")
+   ```
+
+2. **Email Format Validation**
+   ```python
+   from fasthtml_admin import validation_manager
+   
+   # Returns a boolean and a message
+   is_valid, message = validation_manager.validate("email_format", "user@example.com")
+   
+   if is_valid:
+       print("Email format is valid")
+   else:
+       print(message)
+   ```
+
+3. **Passwords Match Validation**
+   ```python
+   from fasthtml_admin import validation_manager
+   
+   # Returns a boolean and a message
+   is_match, message = validation_manager.validate("passwords_match", "password1", "password1")
+   
+   if is_match:
+       print("Passwords match")
+   else:
+       print(message)
+   ```
+
+### Custom Validators
+
+You can register your own custom validators with the validation system:
+
+```python
+from fasthtml_admin import validation_manager
+
+# Define a custom validator function
+def validate_username(username: str) -> tuple[bool, str]:
+    """
+    Validate username format and return (is_valid, message).
+    """
+    if not username:
+        return False, "Username is required"
+    
+    if len(username) < 3:
+        return False, "Username must be at least 3 characters"
+    
+    if len(username) > 20:
+        return False, "Username must be at most 20 characters"
+    
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return False, "Username must contain only letters, numbers, and underscores"
+    
+    return True, "Username is valid"
+
+# Register the custom validator
+validation_manager.register_validator("username", validate_username)
+
+# Use the custom validator
+is_valid, message = validation_manager.validate("username", "user123")
+```
+
+### HTMX Integration for Real-time Validation
+
+The library can be easily integrated with HTMX to provide real-time validation feedback to users. Here's an example of how to set up real-time validation for a registration form:
+
+```python
+@app.get("/register")
+def get_register(session):
+    # Create a form with HTMX validation
+    form = Form(
+        H1("Registration with Real-time Validation"),
+        
+        # Username field with HTMX validation
+        Div(
+            Label("Username", 
+                  Input(name="username", placeholder="Username", required=True,
+                        hx_post="/validate/username",
+                        hx_trigger="keyup changed delay:500ms",
+                        hx_target="#username-feedback")),
+            Div(id="username-feedback", cls="feedback"),
+            cls="form-group"
+        ),
+        
+        # Email field with HTMX validation
+        Div(
+            Label("Email", 
+                  Input(name="email", type="email", placeholder="Email", required=True,
+                        hx_post="/validate/email",
+                        hx_trigger="keyup changed delay:500ms",
+                        hx_target="#email-feedback")),
+            Div(id="email-feedback", cls="feedback"),
+            cls="form-group"
+        ),
+        
+        # Password field with HTMX validation
+        Div(
+            Label("Password", 
+                  Input(name="password", type="password", placeholder="Password", required=True,
+                        hx_post="/validate/password",
+                        hx_trigger="keyup changed delay:500ms",
+                        hx_target="#password-feedback")),
+            Div(id="password-feedback", cls="feedback"),
+            cls="form-group"
+        ),
+        
+        Button("Register", type="submit"),
+        action="/register",
+        method="post"
+    )
+    
+    return Container(form)
+
+@app.post("/validate/username")
+def validate_username_endpoint(username: str):
+    is_valid, message = validation_manager.validate("username", username)
+    cls = "valid" if is_valid else "invalid"
+    return Div(message, cls=f"feedback {cls}")
+
+@app.post("/validate/email")
+def validate_email_endpoint(email: str):
+    is_valid, message = validation_manager.validate("email_format", email)
+    cls = "valid" if is_valid else "invalid"
+    return Div(message, cls=f"feedback {cls}")
+
+@app.post("/validate/password")
+def validate_password_endpoint(password: str):
+    score, issues = validation_manager.validate("password_strength", password)
+    is_valid = score >= 50
+    
+    if is_valid:
+        message = f"Password strength: {score}/100"
+        cls = "valid"
+    else:
+        message = f"Issues: {', '.join(issues)}"
+        cls = "invalid"
+    
+    return Div(message, cls=f"feedback {cls}")
+```
+
+This setup provides immediate feedback to users as they type, improving the user experience and reducing form submission errors.
 
 ## Example Application
 
@@ -512,8 +622,10 @@ python example.py
 
 This will start a web server at http://localhost:8000 with the following features:
 - User registration with email confirmation
-- User login
+- User login with session management
 - Admin panel with database backup and restore
+- Authentication using FastHTML's Beforeware
+- Real-time form validation using HTMX
 
 ## Customization
 

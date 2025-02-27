@@ -5,10 +5,11 @@ Authentication module for the fasthtml_admin library.
 import secrets
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Optional
-from fasthtml.common import database
+from typing import Optional, Union, Dict, Any, Tuple, List
+from fasthtml.common import database, RedirectResponse, Beforeware
 
 from .utils import hash_password, verify_password, generate_token
+from .validation import validation_manager
 
 @dataclass
 class ConfirmToken:
@@ -35,17 +36,79 @@ class UserCredential:
     is_admin: bool = False
     last_login: Optional[datetime] = None
 
+def auth_before(req, sess, user_manager, login_url='/login', public_paths=None):
+    """
+    Authentication Beforeware function for FastHTML.
+    Checks if user is authenticated and redirects to login page if not.
+    
+    Args:
+        req: The request object
+        sess: The session object
+        user_manager: An instance of UserManager
+        login_url: URL to redirect to if not authenticated
+        public_paths: List of paths that don't require authentication
+        
+    Returns:
+        RedirectResponse if not authenticated, None otherwise
+    """
+    if public_paths is None:
+        public_paths = ['/', '/login', '/register', '/confirm-email']
+    
+    # Skip authentication for public routes
+    path = req.url.path
+    if path in public_paths or any(path.startswith(p) for p in public_paths if p.endswith('/')):
+        return
+    
+    # Check if user is authenticated
+    if 'user_id' not in sess:
+        return RedirectResponse(login_url, status_code=303)
+    
+    # Store auth info in request scope for easy access
+    req.scope['auth'] = sess.get('user_id')
+
+
+def get_current_user(sess, user_manager):
+    """
+    Get the current user from the session.
+    
+    Args:
+        sess: The session object
+        user_manager: An instance of UserManager
+        
+    Returns:
+        The user object or None if not logged in
+    """
+    user_id = sess.get('user_id')
+    if not user_id:
+        return None
+    
+    # Find user by ID
+    users = user_manager.users
+    if user_manager.is_db:
+        # Using FastHTML database
+        for user in users():
+            if user.id == user_id:
+                return user
+    else:
+        # Using dictionary store
+        for user in users.values():
+            if user["id"] == user_id:
+                return user
+    return None
+
+
 class UserManager:
     """
     Manages user authentication, registration, and related operations.
     """
-    def __init__(self, db_or_store, table_name="user_credentials"):
+    def __init__(self, db_or_store, table_name="user_credentials", validation_mgr=None):
         """
         Initialize the UserManager with either a FastHTML database or a dictionary store.
         
         Args:
             db_or_store: Either a FastHTML database instance or a dictionary for storing users
             table_name: Name of the table to use if db_or_store is a FastHTML database
+            validation_mgr: Optional ValidationManager instance for custom validation
         """
         self.is_db = hasattr(db_or_store, 'create')
         
@@ -56,21 +119,77 @@ class UserManager:
         else:
             # Using dictionary store
             self.users = db_or_store
+            
+        # Use provided validation manager or the global instance
+        self.validation_manager = validation_mgr or validation_manager
     
-    def create_user(self, email, password):
+    def validate_email(self, email: str) -> Tuple[bool, str]:
+        """
+        Validate email format.
+        
+        Args:
+            email: The email to validate
+            
+        Returns:
+            A tuple containing a boolean indicating if the email is valid and a message
+        """
+        return self.validation_manager.validate("email_format", email)
+    
+    def validate_password(self, password: str, min_score: int = 50) -> Tuple[bool, List[str]]:
+        """
+        Validate password strength.
+        
+        Args:
+            password: The password to validate
+            min_score: Minimum acceptable score (0-100)
+            
+        Returns:
+            A tuple containing a boolean indicating if the password is strong enough and a list of issues
+        """
+        score, issues = self.validation_manager.validate("password_strength", password)
+        return score >= min_score, issues
+    
+    def validate_passwords_match(self, password: str, confirm_password: str) -> Tuple[bool, str]:
+        """
+        Validate that passwords match.
+        
+        Args:
+            password: The first password
+            confirm_password: The second password to compare
+            
+        Returns:
+            A tuple containing a boolean indicating if the passwords match and a message
+        """
+        return self.validation_manager.validate("passwords_match", password, confirm_password)
+    
+    def create_user(self, email, password, min_password_score=50, validate=True):
         """
         Create a new user with the given email and password.
         
         Args:
             email: User's email address
             password: Plain text password to be hashed
+            min_password_score: Minimum acceptable password score (0-100)
+            validate: Whether to validate email and password
             
         Returns:
             The created user object
             
         Raises:
-            ValueError: If a user with the given email already exists
+            ValueError: If validation fails or a user with the given email already exists
         """
+        # Validate email and password if validation is enabled
+        if validate:
+            # Validate email format
+            is_valid_email, email_message = self.validate_email(email)
+            if not is_valid_email:
+                raise ValueError(email_message)
+            
+            # Validate password strength
+            is_strong_password, password_issues = self.validate_password(password, min_password_score)
+            if not is_strong_password:
+                raise ValueError(f"Password is not strong enough: {', '.join(password_issues)}")
+        
         # Check if user already exists
         try:
             if self.is_db:

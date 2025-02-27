@@ -11,14 +11,20 @@ An example FAST HTML Website that includes:
 
 import os
 import secrets
+import re
 from datetime import datetime, timedelta
 from fasthtml.common import *
 
 # Import our library
-from fasthtml_admin import UserManager, UserCredential, AdminManager, ConfirmToken
-
-# Create a FastHTML app
-app, rt = fast_app()
+from fasthtml_admin import (
+    UserManager, 
+    UserCredential, 
+    AdminManager, 
+    ConfirmToken, 
+    auth_before, 
+    get_current_user,
+    validation_manager
+)
 
 # Create a database
 db_path = "data"
@@ -29,6 +35,34 @@ db = database(os.path.join(db_path, "example.db"))
 
 # Create a token store for confirmation tokens
 confirm_tokens = db.create(ConfirmToken, pk="token")
+
+# Register a custom username validator
+def validate_username(username: str) -> tuple[bool, str]:
+    """
+    Validate username format and return (is_valid, message).
+    
+    Args:
+        username: The username to validate
+        
+    Returns:
+        A tuple containing a boolean indicating if the username is valid and a message
+    """
+    if not username:
+        return False, "Username is required"
+    
+    if len(username) < 3:
+        return False, "Username must be at least 3 characters"
+    
+    if len(username) > 20:
+        return False, "Username must be at most 20 characters"
+    
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return False, "Username must contain only letters, numbers, and underscores"
+    
+    return True, "Username is valid"
+
+# Register the custom validator
+validation_manager.register_validator("username", validate_username)
 
 # Initialize UserManager with our database
 user_manager = UserManager(db)
@@ -41,8 +75,11 @@ admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com")
 admin_password = os.environ.get("ADMIN_PASSWORD", "adminpass")
 admin_manager.ensure_admin(admin_email, admin_password)
 
-# Simple session management
-sessions = {}
+# Define authentication Beforeware with our specific configuration
+def app_auth_before(req, sess):
+    return auth_before(req, sess, user_manager, 
+                      login_url='/login',
+                      public_paths=['/', '/login', '/register', '/advanced-register', '/confirm-email', '/confirm-email/'])
 
 # Fake email sending function
 def send_confirmation_email(email, token):
@@ -54,29 +91,22 @@ def send_confirmation_email(email, token):
     print(f"Confirmation link: http://localhost:8000/confirm-email/{token}")
     return True
 
-# Helper function to check if user is logged in
-def get_current_user(req):
-    session_id = req.cookies.get("session_id")
-    if session_id and session_id in sessions:
-        user_id = sessions[session_id]
-        # Find user by ID
-        users = user_manager.users
-        if user_manager.is_db:
-            # Using FastHTML database
-            for user in users():
-                if user.id == user_id:
-                    return user
-        else:
-            # Using dictionary store
-            for user in users.values():
-                if user["id"] == user_id:
-                    return user
-    return None
+# Create a FastHTML app with session support and authentication
+beforeware = Beforeware(app_auth_before)
+app, rt = fast_app(
+    secret_key="your-secret-key-here",  # In production, use a secure random key
+    before=beforeware,
+    session_cookie="session",
+    max_age=3600 * 24 * 7,  # 7 days
+    sess_path="/",
+    same_site="lax",
+    sess_https_only=False  # Set to True in production with HTTPS
+)
 
 # Routes
 @app.get("/")
-def home(req):
-    user = get_current_user(req)
+def home(session):
+    user = get_current_user(session, user_manager)
     
     if user:
         # User is logged in
@@ -97,7 +127,8 @@ def home(req):
             P("This is an example website demonstrating the fasthtml_admin library."),
             Div(
                 A("Login", href="/login", cls="button"),
-                A("Register", href="/register", cls="button secondary"),
+                A("Register", href="/register", cls="button"),
+                A("Advanced Register", href="/advanced-register", cls="button secondary"),
                 style="display: flex; gap: 1rem;"
             )
         )
@@ -105,8 +136,8 @@ def home(req):
     return content
 
 @app.get("/register")
-def get_register(req):
-    user = get_current_user(req)
+def get_register(session):
+    user = get_current_user(session, user_manager)
     if user:
         return RedirectResponse("/")
     
@@ -125,16 +156,18 @@ def get_register(req):
 
 @app.post("/register")
 def post_register(email: str, password: str, confirm_password: str):
-    if password != confirm_password:
-        return Container(
-            H1("Registration Failed"),
-            P("Passwords do not match."),
-            A("Try Again", href="/register", cls="button")
-        )
-    
     try:
-        # Create user
-        user = user_manager.create_user(email, password)
+        # Validate that passwords match
+        is_match, match_message = user_manager.validate_passwords_match(password, confirm_password)
+        if not is_match:
+            return Container(
+                H1("Registration Failed"),
+                P(match_message),
+                A("Try Again", href="/register", cls="button")
+            )
+        
+        # Create user (this will validate email format and password strength)
+        user = user_manager.create_user(email, password, min_password_score=50)
         
         # Generate confirmation token
         token = user_manager.generate_confirmation_token(email, confirm_tokens)
@@ -154,6 +187,202 @@ def post_register(email: str, password: str, confirm_password: str):
             H1("Registration Failed"),
             P(str(e)),
             A("Try Again", href="/register", cls="button")
+        )
+
+# Advanced registration with HTMX-based validation
+@app.get("/advanced-register")
+def get_advanced_register(session):
+    user = get_current_user(session, user_manager)
+    if user:
+        return RedirectResponse("/")
+    
+    # Create a form with HTMX validation
+    form = Form(
+        H1("Advanced Registration with Real-time Validation"),
+        
+        # Username field with HTMX validation
+        Div(
+            Label("Username", 
+                  Input(name="username", placeholder="Username", required=True,
+                        hx_post="/validate/username",
+                        hx_trigger="keyup changed delay:500ms",
+                        hx_target="#username-feedback")),
+            Div(id="username-feedback", cls="feedback"),
+            cls="form-group"
+        ),
+        
+        # Email field with HTMX validation
+        Div(
+            Label("Email", 
+                  Input(name="email", type="email", placeholder="Email", required=True,
+                        hx_post="/validate/email",
+                        hx_trigger="keyup changed delay:500ms",
+                        hx_target="#email-feedback")),
+            Div(id="email-feedback", cls="feedback"),
+            cls="form-group"
+        ),
+        
+        # Password field with HTMX validation
+        Div(
+            Label("Password", 
+                  Input(name="password", type="password", placeholder="Password", required=True,
+                        hx_post="/validate/password",
+                        hx_trigger="keyup changed delay:500ms",
+                        hx_target="#password-feedback")),
+            Div(id="password-feedback", cls="feedback"),
+            cls="form-group"
+        ),
+        
+        # Confirm password field with HTMX validation
+        Div(
+            Label("Confirm Password", 
+                  Input(name="confirm_password", type="password", placeholder="Confirm Password", required=True,
+                        hx_post="/validate/passwords-match",
+                        hx_trigger="keyup changed delay:500ms",
+                        hx_target="#confirm-feedback")),
+            Div(id="confirm-feedback", cls="feedback"),
+            cls="form-group"
+        ),
+        
+        Button("Register", type="submit", id="register-button", disabled=True),
+        P(A("Already have an account? Login", href="/login")),
+        
+        # Add some CSS for the form
+        Style("""
+            .form-group { margin-bottom: 1rem; }
+            .feedback { min-height: 1.5rem; font-size: 0.875rem; margin-top: 0.25rem; }
+            .feedback.valid { color: green; }
+            .feedback.invalid { color: red; }
+        """),
+        
+        action="/advanced-register",
+        method="post",
+        hx_post="/advanced-register",
+        hx_target="#registration-result"
+    )
+    
+    return Container(
+        form,
+        Div(id="registration-result")
+    )
+
+@app.post("/validate/username")
+def validate_username_endpoint(username: str):
+    is_valid, message = validation_manager.validate("username", username)
+    cls = "valid" if is_valid else "invalid"
+    return Div(message, cls=f"feedback {cls}")
+
+@app.post("/validate/email")
+def validate_email_endpoint(email: str):
+    is_valid, message = validation_manager.validate("email_format", email)
+    cls = "valid" if is_valid else "invalid"
+    return Div(message, cls=f"feedback {cls}")
+
+@app.post("/validate/password")
+def validate_password_endpoint(password: str):
+    score, issues = validation_manager.validate("password_strength", password)
+    is_valid = score >= 50
+    
+    if is_valid:
+        message = f"Password strength: {score}/100"
+        cls = "valid"
+    else:
+        message = f"Issues: {', '.join(issues)}"
+        cls = "invalid"
+    
+    return Div(message, cls=f"feedback {cls}")
+
+@app.post("/validate/passwords-match")
+def validate_passwords_match_endpoint(password: str, confirm_password: str):
+    is_valid, message = validation_manager.validate("passwords_match", password, confirm_password)
+    cls = "valid" if is_valid else "invalid"
+    
+    # Enable or disable the register button based on validation
+    script = ""
+    if is_valid:
+        script = """
+        <script>
+            // Check if all validations are successful
+            const feedbacks = document.querySelectorAll('.feedback');
+            let allValid = true;
+            
+            feedbacks.forEach(feedback => {
+                if (!feedback.classList.contains('valid')) {
+                    allValid = false;
+                }
+            });
+            
+            // Enable or disable the register button
+            document.getElementById('register-button').disabled = !allValid;
+        </script>
+        """
+    
+    return Div(
+        Div(message, cls=f"feedback {cls}"),
+        NotStr(script)
+    )
+
+@app.post("/advanced-register")
+def post_advanced_register(username: str, email: str, password: str, confirm_password: str):
+    try:
+        # Validate username
+        is_valid_username, username_message = validation_manager.validate("username", username)
+        if not is_valid_username:
+            return Div(
+                H2("Registration Failed"),
+                P(username_message),
+                cls="error"
+            )
+        
+        # Validate email
+        is_valid_email, email_message = validation_manager.validate("email_format", email)
+        if not is_valid_email:
+            return Div(
+                H2("Registration Failed"),
+                P(email_message),
+                cls="error"
+            )
+        
+        # Validate password strength
+        score, issues = validation_manager.validate("password_strength", password)
+        if score < 50:
+            return Div(
+                H2("Registration Failed"),
+                P(f"Password is not strong enough: {', '.join(issues)}"),
+                cls="error"
+            )
+        
+        # Validate passwords match
+        is_match, match_message = validation_manager.validate("passwords_match", password, confirm_password)
+        if not is_match:
+            return Div(
+                H2("Registration Failed"),
+                P(match_message),
+                cls="error"
+            )
+        
+        # Create user
+        user = user_manager.create_user(email, password)
+        
+        # Generate confirmation token
+        token = user_manager.generate_confirmation_token(email, confirm_tokens)
+        
+        # Send confirmation email
+        send_confirmation_email(email, token)
+        
+        return Div(
+            H2("Registration Successful"),
+            P("A confirmation email has been sent to your email address."),
+            P("Please check your email and click the confirmation link to activate your account."),
+            P("For this example, the confirmation link is printed to the console."),
+            A("Login", href="/login", cls="button"),
+            cls="success"
+        )
+    except ValueError as e:
+        return Div(
+            H2("Registration Failed"),
+            P(str(e)),
+            cls="error"
         )
 
 @app.get("/confirm-email/{token}")
@@ -207,8 +436,8 @@ def confirm_email(token: str):
         )
 
 @app.get("/login")
-def get_login(req):
-    user = get_current_user(req)
+def get_login(session):
+    user = get_current_user(session, user_manager)
     if user:
         return RedirectResponse("/")
     
@@ -225,7 +454,7 @@ def get_login(req):
     return Container(form)
 
 @app.post("/login")
-def post_login(email: str, password: str):
+def post_login(email: str, password: str, session):
     user = user_manager.authenticate_user(email, password)
     
     if not user:
@@ -245,34 +474,26 @@ def post_login(email: str, password: str):
             A("Try Again", href="/login", cls="button")
         )
     
-    # Create session
-    session_id = secrets.token_urlsafe()
+    # Store user ID in session
     user_id = user.id if user_manager.is_db else user["id"]
-    sessions[session_id] = user_id
+    session['user_id'] = user_id
     
-    # Redirect to dashboard with session cookie
+    # Redirect to dashboard
     # Use status_code 303 to change the method from POST to GET
-    response = RedirectResponse("/dashboard", status_code=303)
-    response.set_cookie(key="session_id", value=session_id)
-    
-    return response
+    return RedirectResponse("/dashboard", status_code=303)
 
 @app.get("/logout")
-def logout(req):
-    session_id = req.cookies.get("session_id")
-    if session_id and session_id in sessions:
-        del sessions[session_id]
+def logout(session):
+    # Clear session
+    if 'user_id' in session:
+        del session['user_id']
     
-    response = RedirectResponse("/")
-    response.delete_cookie(key="session_id")
-    
-    return response
+    return RedirectResponse("/")
 
 @app.get("/dashboard")
-def dashboard(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
+def dashboard(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
     
     email = user.email if user_manager.is_db else user["email"]
     is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
@@ -286,10 +507,9 @@ def dashboard(req):
     )
 
 @app.get("/admin")
-def admin_panel(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
+def admin_panel(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
     
     is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
     if not is_admin:
@@ -315,10 +535,9 @@ def admin_panel(req):
     )
 
 @app.get("/admin/backup-db")
-def backup_db(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
+def backup_db(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
     
     is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
     if not is_admin:
@@ -345,10 +564,9 @@ def backup_db(req):
         )
 
 @app.get("/admin/download-db")
-def download_db(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
+def download_db(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
     
     is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
     if not is_admin:
@@ -384,10 +602,9 @@ def download_db(req):
         )
 
 @app.get("/admin/upload-db")
-def get_upload_db(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
+def get_upload_db(session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
     
     is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
     if not is_admin:
@@ -411,10 +628,9 @@ def get_upload_db(req):
     return Container(form)
 
 @app.post("/admin/upload-db")
-async def post_upload_db(req):
-    user = get_current_user(req)
-    if not user:
-        return RedirectResponse("/login")
+async def post_upload_db(req, session):
+    user = get_current_user(session, user_manager)
+    # The auth_before Beforeware will handle redirecting if not logged in
     
     is_admin = user.is_admin if user_manager.is_db else user["is_admin"]
     if not is_admin:
