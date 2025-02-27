@@ -1,5 +1,3 @@
-# FastHTML Admin Library
-
 A Python library for user authentication, admin management, and database administration in FastHTML applications.
 
 ## Features
@@ -16,13 +14,10 @@ A Python library for user authentication, admin management, and database adminis
 
 ## Installation
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/fasthtml-admin.git
+You can install the package using pip or uv.
 
-# Install the package
-cd fasthtml-admin
-pip install -e .
+```bash
+pip install fasthtml-admin
 ```
 
 ## Usage
