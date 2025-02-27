@@ -674,4 +674,4 @@ async def post_upload_db(req, session):
             A("Try Again", href="/admin/upload-db", cls="button")
         )
 
-serve()
+serve(host="localhost", port=8000)

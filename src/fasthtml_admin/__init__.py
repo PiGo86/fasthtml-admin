@@ -14,6 +14,7 @@ from .validation import (
     ValidationManager,
     validation_manager
 )
+from .oauth import OAuthManager
 
 __all__ = [
     'UserManager',
@@ -30,4 +31,5 @@ __all__ = [
     'validate_passwords_match',
     'ValidationManager',
     'validation_manager',
+    'OAuthManager',
 ]

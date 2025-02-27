@@ -12,6 +12,7 @@ A Python library for user authentication, admin management, and database adminis
 - Built-in validation functions for passwords, emails, and more
 - Extensible validation system for custom validation rules
 - HTMX integration for real-time form validation
+- OAuth integration for third-party authentication
 
 ## Installation
 
@@ -611,9 +612,11 @@ def validate_password_endpoint(password: str):
 
 This setup provides immediate feedback to users as they type, improving the user experience and reducing form submission errors.
 
-## Example Application
+## Example Applications
 
-The library includes an example FastHTML application that demonstrates all the features. To run the example:
+The library includes example FastHTML applications that demonstrate all the features:
+
+### Basic Example
 
 ```bash
 cd fasthtml-admin
@@ -626,6 +629,107 @@ This will start a web server at http://localhost:8000 with the following feature
 - Admin panel with database backup and restore
 - Authentication using FastHTML's Beforeware
 - Real-time form validation using HTMX
+
+### OAuth Example
+
+```bash
+cd fasthtml-admin
+python example_oauth.py
+```
+
+This example demonstrates OAuth integration with the fasthtml_admin library:
+- Authentication with GitHub OAuth
+- Integration with the UserManager for user creation and retrieval
+- Protected routes with authentication
+- Session management
+
+To use the OAuth example, you need to:
+1. Register an OAuth app on GitHub (or your preferred provider)
+2. Set the required environment variables (e.g., GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET)
+3. Set the Authorization callback URL to http://localhost:8000/auth_redirect
+
+## OAuth Integration
+
+The library includes an `OAuthManager` class that integrates with FastHTML's OAuth support to provide third-party authentication. Here's how to use it:
+
+```python
+from fasthtml.common import *
+from fasthtml.oauth import GitHubAppClient
+from fasthtml_admin import UserManager, OAuthManager, get_current_user
+
+# Initialize UserManager
+db = database("data/myapp.db")
+user_manager = UserManager(db)
+
+# Create an OAuth client
+client = GitHubAppClient(
+    client_id=os.environ.get("GITHUB_CLIENT_ID"),
+    client_secret=os.environ.get("GITHUB_CLIENT_SECRET")
+)
+
+# Create a FastHTML app
+app, rt = fast_app(
+    secret_key="your-secret-key-here",
+    session_cookie="session",
+    max_age=3600 * 24 * 7  # 7 days
+)
+
+# Initialize OAuthManager with the app, client, and user manager
+oauth = OAuthManager(
+    app=app,
+    client=client,
+    user_manager=user_manager,
+    redir_path='/auth_redirect',  # Path for OAuth callback
+    login_path='/login',          # Path to redirect to for login
+    dashboard_path='/dashboard'   # Path to redirect to after successful authentication
+)
+
+# Add routes
+@app.get('/')
+def home(session, request):
+    user = get_current_user(session, user_manager)
+    login_link = oauth.login_link(request)
+    
+    if user:
+        # User is logged in
+        return Container(
+            H1(f"Welcome, {user.email}!"),
+            P("You are logged in via OAuth."),
+            A("Logout", href="/logout", cls="button")
+        )
+    else:
+        # User is not logged in
+        return Container(
+            H1("Welcome"),
+            P("Please log in to continue."),
+            A("Login with GitHub", href=login_link, cls="button")
+        )
+
+@app.get('/dashboard')
+def dashboard(session):
+    user = get_current_user(session, user_manager)
+    # Display user information
+    return Container(
+        H1(f"Welcome, {user.email}!"),
+        P("You are logged in via OAuth.")
+    )
+```
+
+The `OAuthManager` class handles:
+
+1. Setting up the OAuth flow with the provider
+2. Creating or retrieving users based on OAuth information
+3. Managing user sessions
+4. Protecting routes with authentication
+
+It works with any OAuth provider supported by FastHTML, including:
+- GitHub
+- Google
+- Discord
+- HuggingFace
+- Auth0
+
+For a complete example, see `example_oauth.py`.
 
 ## Customization
 
