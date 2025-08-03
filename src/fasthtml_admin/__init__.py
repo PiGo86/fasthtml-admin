@@ -4,7 +4,9 @@ FastHTML Admin Library
 A library for user authentication, admin management, database administration, and validation.
 """
 
-from .auth import UserManager, UserCredential, ConfirmToken, auth_before, get_current_user
+from .auth import UserManager, auth_before, get_current_user
+from .models import UserCredential, ConfirmToken
+from .models.peewee_adaptator import UserCredentialPeewee, ConfirmTokenPeewee
 from .admin import AdminManager
 from .utils import generate_token, hash_password, verify_password
 from .validation import (
@@ -19,7 +21,9 @@ from .oauth import OAuthManager
 __all__ = [
     'UserManager',
     'UserCredential',
+    'UserCredentialPeewee',
     'ConfirmToken',
+    'ConfirmTokenPeewee',
     'AdminManager',
     'generate_token',
     'hash_password',

@@ -6,19 +6,11 @@ import secrets
 from datetime import datetime
 import os
 import sqlite3
-from dataclasses import dataclass
 
 from .utils import hash_password
-
-@dataclass
-class SystemSetting:
-    """
-    System setting class for storing configuration values.
-    This class is designed to work with FastHTML's database system.
-    """
-    key: str  # Primary key
-    value: str
-    updated_at: datetime = None
+from .auth import Storage
+from .models import SystemSetting
+from .models.peewee_adaptator import SystemSettingPeewee
 
 class AdminManager:
     """
@@ -32,37 +24,56 @@ class AdminManager:
             user_manager: An instance of UserManager to handle user operations
         """
         self.user_manager = user_manager
-        
-        # Create settings table if using FastHTML database
-        if self.user_manager.is_db:
-            self.settings = self.user_manager.db.create(SystemSetting, pk="key", name="system_settings")
+
+        match self.user_manager.storage:
+
+            case Storage.FAST_HTML:
+                # Create settings table if using FastHTML database
+                self.settings = self.user_manager.db.create(SystemSetting,
+                                                            pk="key",
+                                                            name="system_settings",
+                                                            )
             
-            # Initialize maintenance mode setting if it doesn't exist
-            try:
-                self.settings["maintenance_mode"]
-            except (KeyError, IndexError, Exception) as e:
-                # Setting doesn't exist, create it
-                if not isinstance(e, Exception) or "NotFoundError" not in str(type(e)):
-                    raise  # Re-raise if it's not a NotFoundError
-                
-                self.settings.insert({
-                    "key": "maintenance_mode",
-                    "value": "false",
-                    "updated_at": datetime.now()
-                })
-        else:
-            # Using dictionary store
-            # Initialize settings dictionary if it doesn't exist
-            if not hasattr(self.user_manager, "settings"):
-                self.user_manager.settings = {}
+                # Initialize maintenance mode setting if it doesn't exist
+                try:
+                    self.settings["maintenance_mode"]
+                except (KeyError, IndexError, Exception) as e:
+                    # Setting doesn't exist, create it
+                    if not isinstance(e, Exception) or "NotFoundError" not in str(type(e)):
+                        raise  # Re-raise if it's not a NotFoundError
+
+                    self.settings.insert({
+                        "key": "maintenance_mode",
+                        "value": "false",
+                        "updated_at": datetime.now()
+                    })
+
+            case Storage.PEEWEE:
+                # Create settings table if using peewee database
+                self.settings = SystemSettingPeewee
+                self.user_manager.db.create_tables([SystemSettingPeewee,])
+
+                # Initialize maintenance mode setting if it doesn't exist
+                maintenance_mode = self.settings.get_or_none(key='maintenance_mode')
+                if maintenance_mode is None:
+                    self.settings.create(key='maintenance_mode',
+                                         value='false',
+                                         updated_at=datetime.now(),
+                                         )
+
+            case _:
+                # Using dictionary store
+                # Initialize settings dictionary if it doesn't exist
+                if not hasattr(self.user_manager, "settings"):
+                    self.user_manager.settings = {}
             
-            # Initialize maintenance mode setting if it doesn't exist
-            if "maintenance_mode" not in self.user_manager.settings:
-                self.user_manager.settings["maintenance_mode"] = {
-                    "key": "maintenance_mode",
-                    "value": "false",
-                    "updated_at": datetime.now()
-                }
+                # Initialize maintenance mode setting if it doesn't exist
+                if "maintenance_mode" not in self.user_manager.settings:
+                    self.user_manager.settings["maintenance_mode"] = {
+                        "key": "maintenance_mode",
+                        "value": "false",
+                        "updated_at": datetime.now()
+                    }
     
     def set_maintenance_mode(self, enabled):
         """
@@ -74,18 +85,25 @@ class AdminManager:
         Returns:
             The current maintenance mode state
         """
-        value = "true" if enabled else "false"
-        
-        if self.user_manager.is_db:
-            # Update setting in database
-            setting = self.settings["maintenance_mode"]
-            setting.value = value
-            setting.updated_at = datetime.now()
-            self.settings.update(setting)
-        else:
-            # Update setting in dictionary store
-            self.user_manager.settings["maintenance_mode"]["value"] = value
-            self.user_manager.settings["maintenance_mode"]["updated_at"] = datetime.now()
+        value = str(enabled).lower()
+
+        match self.user_manager.storage:
+
+            case Storage.FAST_HTML: # Update setting in FastHTML database
+                setting = self.settings["maintenance_mode"]
+                setting.value = value
+                setting.updated_at = datetime.now()
+                self.settings.update(setting)
+
+            case Storage.PEEWEE: # Update setting in peewee database
+                setting = self.settings.get(key='maintenance_mode')
+                setting.value = value
+                setting.updated_at = datetime.now()
+                setting.save()
+
+            case _: # Update setting in dictionary store
+                self.user_manager.settings["maintenance_mode"]["value"] = value
+                self.user_manager.settings["maintenance_mode"]["updated_at"] = datetime.now()
         
         return enabled
     
@@ -97,13 +115,18 @@ class AdminManager:
             Boolean indicating whether maintenance mode is enabled
         """
         try:
-            if self.user_manager.is_db:
-                # Get setting from database
-                setting = self.settings["maintenance_mode"]
-                return setting.value.lower() == "true"
-            else:
-                # Get setting from dictionary store
-                return self.user_manager.settings["maintenance_mode"]["value"].lower() == "true"
+            match self.user_manager.storage:
+                case Storage.FAST_HTML: # Get setting from FastHTML database
+                    setting = self.settings["maintenance_mode"]
+                    return setting.value.lower() == "true"
+                case Storage.PEEWEE: # Get setting from peewee database
+                    setting = self.settings.get_or_none(key='maintenance_mode')
+                    if setting is not None:
+                        return setting.value.lower() == "true"
+                    else:
+                        return False
+                case _: # Get setting from dictionary store
+                    return self.user_manager.settings["maintenance_mode"]["value"].lower() == "true"
         except (KeyError, IndexError, Exception) as e:
             # Setting doesn't exist, return default value
             return False
@@ -123,26 +146,42 @@ class AdminManager:
         """
         try:
             # Check if user exists
-            if self.user_manager.is_db:
-                user = self.user_manager.users[admin_email]
+            match self.user_manager.storage:
+
+                case Storage.FAST_HTML:
+                    user = self.user_manager.users[admin_email]
                 
-                # If user exists but is not admin, promote to admin
-                if not user.is_admin:
-                    user.is_admin = True
-                    user.is_confirmed = True  # Admins are auto-confirmed
-                    self.user_manager.users.update(user)
-                
-                return user
-            else:
-                user = self.user_manager.users.get(admin_email)
-                
-                if user:
                     # If user exists but is not admin, promote to admin
-                    if not user.get("is_admin", False):
-                        user["is_admin"] = True
-                        user["is_confirmed"] = True  # Admins are auto-confirmed
-                    
+                    if not user.is_admin:
+                        user.is_admin = True
+                        user.is_confirmed = True  # Admins are auto-confirmed
+                        self.user_manager.users.update(user)
+
                     return user
+
+                case Storage.PEEWEE:
+                    user = self.user_manager.users.get_or_none(email=admin_email)
+
+                    # If user exists but is not admin, promote to admin
+                    if user is not None:
+                        if not user.is_admin:
+                            user.is_admin = True
+                            user.is_confirmed = True  # Admins are auto-confirmed
+                            user.save()
+
+                        return user
+
+                case _:
+                    user = self.user_manager.users.get(admin_email)
+                
+                    if user:
+                        # If user exists but is not admin, promote to admin
+                        if not user.get("is_admin", False):
+                            user["is_admin"] = True
+                            user["is_confirmed"] = True  # Admins are auto-confirmed
+
+                        return user
+
         except (KeyError, IndexError, Exception) as e:
             # User doesn't exist, create a new admin user
             # NotFoundError is raised by FastHTML database when a record is not found
@@ -159,14 +198,15 @@ class AdminManager:
             "is_confirmed": True,  # Admins are auto-confirmed
             "is_admin": True
         }
-        
-        if self.user_manager.is_db:
-            # Insert into FastHTML database
-            user = self.user_manager.users.insert(user_data)
-        else:
-            # Insert into dictionary store
-            self.user_manager.users[admin_email] = user_data
-            user = user_data
+
+        match self.user_manager.storage:
+            case Storage.FAST_HTML: # Insert into FastHTML database
+                user = self.user_manager.users.insert(user_data)
+            case Storage.PEEWEE:
+                user = self.user_manager.users.create(**user_data)
+            case _: # Insert into dictionary store
+                self.user_manager.users[admin_email] = user_data
+                user = user_data
             
         return user
 
