@@ -4,40 +4,30 @@ Authentication module for the fasthtml_admin library.
 
 import secrets
 from datetime import datetime, timedelta
-from dataclasses import dataclass
-from typing import Optional, Union, Dict, Any, Tuple, List
-from fasthtml.common import database, RedirectResponse, Beforeware
+from enum import StrEnum, auto
+from importlib import import_module
+from importlib.util import find_spec
+from typing import Optional, Tuple, List
 
+from fasthtml.common import RedirectResponse, NotFoundError, Database, Table
+import apswutils as apsw
+
+from .models import UserCredential
 from .utils import hash_password, verify_password, generate_token
 from .validation import validation_manager
 
-@dataclass
-class ConfirmToken:
-    """
-    Token for email confirmation.
-    This class is designed to work with FastHTML's database system.
-    """
-    token: str  # Primary key
-    email: str
-    expiry: datetime
-    is_used: bool = False
 
-@dataclass
-class UserCredential:
-    """
-    Basic user credential class for authentication.
-    This class is designed to work with FastHTML's database system.
-    
-    This class can be extended by creating a subclass with additional fields
-    before passing it to the UserManager constructor.
-    """
-    email: str  # Primary key
-    id: str
-    pwd: str  # Hashed password
-    created_at: datetime
-    is_confirmed: bool = False
-    is_admin: bool = False
-    last_login: Optional[datetime] = None
+class Storage(StrEnum):
+    FAST_HTML = auto()
+    PEEWEE = auto()
+    DICT = auto()
+
+
+# Optionally import peewee as pw
+if find_spec('peewee') is not None:
+    pw = import_module('peewee')
+else:
+    pw = None
 
 def auth_before(req, sess, user_manager, login_url='/login', public_paths=None, 
                admin_manager=None, maintenance_url='/maintenance'):
@@ -80,19 +70,25 @@ def auth_before(req, sess, user_manager, login_url='/login', public_paths=None,
             # Find user to check if they're an admin
             users = user_manager.users
             is_admin = False
-            
-            if user_manager.is_db:
-                # Using FastHTML database
-                for user in users():
-                    if user.id == user_id:
+
+            match user_manager.storage:
+
+                case Storage.FAST_HTML: # Using FastHTML database
+                    for user in users():
+                        if user.id == user_id:
+                            is_admin = user.is_admin
+                            break
+
+                case Storage.PEEWEE: # Using peewee database
+                    user = user_manager.users.get_or_none(id=user_id)
+                    if user is not None:
                         is_admin = user.is_admin
-                        break
-            else:
-                # Using dictionary store
-                for user in users.values():
-                    if user["id"] == user_id:
-                        is_admin = user.get("is_admin", False)
-                        break
+
+                case _: # Using dictionary store
+                    for user in users.values():
+                        if user["id"] == user_id:
+                            is_admin = user.get("is_admin", False)
+                            break
             
             # If admin, allow access and store auth info
             if is_admin:
@@ -115,6 +111,7 @@ def auth_before(req, sess, user_manager, login_url='/login', public_paths=None,
     # Store auth info in request scope for easy access
     user_id = sess.get('user_id')
     req.scope['auth'] = user_id
+    return
 
 
 def get_current_user(sess, user_manager):
@@ -134,16 +131,23 @@ def get_current_user(sess, user_manager):
     
     # Find user by ID
     users = user_manager.users
-    if user_manager.is_db:
-        # Using FastHTML database
-        for user in users():
-            if user.id == user_id:
+
+    match user_manager.storage:
+
+        case Storage.FAST_HTML: # Using FastHTML database
+            for user in users():
+                if user.id == user_id:
+                    return user
+
+        case Storage.PEEWEE: # Using peewee database
+            user = users.get_or_none(id=user_id)
+            if user is not None:
                 return user
-    else:
-        # Using dictionary store
-        for user in users.values():
-            if user["id"] == user_id:
-                return user
+
+        case Storage.DICT: # Using dictionary store
+            for user in users.values():
+                if user["id"] == user_id:
+                    return user
     return None
 
 
@@ -151,9 +155,12 @@ class UserManager:
     """
     Manages user authentication, registration, and related operations.
     """
-    def __init__(self, db_or_store, user_class=UserCredential, table_name="user_credentials", validation_mgr=None):
+    def __init__(self, db_or_store, user_class=UserCredential,
+                 table_name="user_credentials", validation_mgr=None,
+                 ):
         """
-        Initialize the UserManager with either a FastHTML database or a dictionary store.
+        Initialize the UserManager with either a FastHTML database, a peewee database
+        or a dictionary store.
         
         Args:
             db_or_store: Either a FastHTML database instance or a dictionary for storing users
@@ -162,16 +169,27 @@ class UserManager:
             table_name: Name of the table to use if db_or_store is a FastHTML database
             validation_mgr: Optional ValidationManager instance for custom validation
         """
-        self.is_db = hasattr(db_or_store, 'create')
         self.user_class = user_class
-        
-        if self.is_db:
-            # Using FastHTML database
+
+        if isinstance(db_or_store, Database):
+            self.is_db = True
+            self.storage = Storage.FAST_HTML
             self.db = db_or_store
-            self.users = self.db.create(user_class, pk="email", name=table_name)
-        else:
-            # Using dictionary store
-            self.users = db_or_store
+            self.users: apsw.Table = self.db.create(user_class,
+                                                         pk="email",
+                                                         name=table_name)
+
+        elif pw is not None and isinstance(db_or_store, pw.Database):
+            self.is_db = True
+            self.storage = Storage.PEEWEE
+            self.db = db_or_store
+            self.db.create_tables([self.user_class,])
+            self.users: type[pw.Model] = self.user_class
+
+        elif isinstance(db_or_store, dict):
+            self.is_db = False
+            self.storage = Storage.DICT
+            self.users: dict = db_or_store
             
         # Use provided validation manager or the global instance
         self.validation_manager = validation_mgr or validation_manager
@@ -215,7 +233,8 @@ class UserManager:
         """
         return self.validation_manager.validate("passwords_match", password, confirm_password)
     
-    def create_user(self, email, password, min_password_score=50, validate=True, **additional_fields):
+    def create_user(self, email, password, min_password_score=50,
+                    validate=True, **additional_fields):
         """
         Create a new user with the given email and password.
         
@@ -247,18 +266,19 @@ class UserManager:
         
         # Check if user already exists
         try:
-            if self.is_db:
-                existing_user = self.users[email]
-            else:
-                existing_user = self.users.get(email)
+            match self.storage:
+                case Storage.FAST_HTML:
+                    existing_user = self.users[email]
+                case Storage.PEEWEE:
+                    existing_user = self.users.get(email=email)
+                case _:
+                    existing_user = self.users.get(email)
             
             if existing_user:
                 raise ValueError(f"User with email {email} already exists")
-        except (KeyError, IndexError, Exception) as e:
+        except (KeyError, IndexError, NotFoundError, pw.DoesNotExist):
             # User doesn't exist, continue with creation
             # NotFoundError is raised by FastHTML database when a record is not found
-            if not isinstance(e, Exception) or "NotFoundError" not in str(type(e)):
-                raise  # Re-raise if it's not a NotFoundError
             pass
         
         # Create new user
@@ -277,14 +297,18 @@ class UserManager:
         
         # Add any additional fields
         user_data.update(additional_fields)
-        
-        if self.is_db:
-            # Insert into FastHTML database
-            user = self.users.insert(user_data)
-        else:
-            # Insert into dictionary store
-            self.users[email] = user_data
-            user = user_data
+
+        match self.storage:
+            case Storage.FAST_HTML:
+                # Insert into FastHTML database
+                user = self.users.insert(user_data)
+            case Storage.PEEWEE:
+                # Insert into peewee database
+                user = self.users.create(**user_data)
+            case _:
+                # Insert into dictionary store
+                self.users[email] = user_data
+                user = user_data
             
         return user
     
@@ -296,34 +320,42 @@ class UserManager:
             email: User's email address
             password: Plain text password to verify
             
-        Returns:
+        Returns:from datetime import timedelta
             The user object if authentication succeeds, None otherwise
         """
         try:
-            if self.is_db:
-                user = self.users[email]
-            else:
-                user = self.users.get(email)
-                
+            match self.storage:
+                case Storage.FAST_HTML:
+                    user = self.users[email]
+                case Storage.PEEWEE:
+                    user = self.users.get(email=email)
+                case _:
+                    user = self.users.get(email)
+
+        except (KeyError, IndexError, NotFoundError):
+            user = None
+
+        finally:
             if not user:
                 return None
                 
-            # Verify password
-            if verify_password(password, user.pwd if self.is_db else user["pwd"]):
-                # Update last login time
-                if self.is_db:
+        # Verify password
+        if verify_password(password, user.pwd if self.storage != Storage.DICT else user["pwd"]):
+            # Update last login time
+            match self.storage:
+                case Storage.FAST_HTML:
                     user.last_login = datetime.now()
                     self.users.update(user)
-                else:
+                case Storage.PEEWEE:
+                    user.last_login = datetime.now()
+                    user.save()
+                case _:
                     user["last_login"] = datetime.now()
-                return user
-            
-            return None
-        except (KeyError, IndexError, Exception) as e:
-            # NotFoundError is raised by FastHTML database when a record is not found
-            if not isinstance(e, Exception) or "NotFoundError" not in str(type(e)):
-                raise  # Re-raise if it's not a NotFoundError or KeyError/IndexError
-            return None
+
+            return user
+
+        return None
+
     
     def confirm_user(self, email):
         """
@@ -336,19 +368,22 @@ class UserManager:
             True if the user was confirmed, False otherwise
         """
         try:
-            if self.is_db:
-                user = self.users[email]
-                user.is_confirmed = True
-                self.users.update(user)
-            else:
-                user = self.users.get(email)
-                if user:
+            match self.storage:
+                case Storage.FAST_HTML:
+                    user = self.users[email]
+                    user.is_confirmed = True
+                    self.users.update(user)
+                case Storage.PEEWEE:
+                    user = self.users.get(email=email)
+                    user.is_confirmed = True
+                    user.save()
+                case _:
+                    user = self.users.get(email)
                     user["is_confirmed"] = True
+
             return True
-        except (KeyError, IndexError, Exception) as e:
-            # NotFoundError is raised by FastHTML database when a record is not found
-            if not isinstance(e, Exception) or "NotFoundError" not in str(type(e)):
-                raise  # Re-raise if it's not a NotFoundError or KeyError/IndexError
+
+        except (KeyError, IndexError, NotFoundError):
             return False
     
     def generate_confirmation_token(self, email, token_store=None, expiry_days=7):
@@ -366,7 +401,6 @@ class UserManager:
         token = generate_token()
         
         if token_store:
-            from datetime import timedelta
             expiry = datetime.now() + timedelta(days=expiry_days)
             
             token_data = {
@@ -375,10 +409,13 @@ class UserManager:
                 "expiry": expiry,
                 "is_used": False
             }
-            
-            if hasattr(token_store, 'insert'):
+
+            if isinstance(token_store, apsw.Table):
                 # FastHTML database
                 token_store.insert(token_data)
+            elif pw is not None and issubclass(token_store, pw.Model):
+                # peewee database
+                token_store.create(**token_data)
             else:
                 # Dictionary store
                 token_store[token] = token_data

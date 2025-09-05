@@ -8,6 +8,8 @@ import secrets
 from fasthtml.common import RedirectResponse
 from fasthtml.oauth import OAuth
 
+from .auth import Storage
+
 class OAuthManager(OAuth):
     """
     OAuth manager that integrates with UserManager.
@@ -75,7 +77,9 @@ class OAuthManager(OAuth):
         
         if existing_user:
             # User exists, update session
-            user_id = existing_user.id if self.user_manager.is_db else existing_user["id"]
+            user_id = (existing_user.id
+                       if self.user_manager.storage in (Storage.FAST_HTML, Storage.PEEWEE)
+                       else existing_user["id"])
             session['user_id'] = user_id
             print(f"Existing user logged in: {email}")
         else:
@@ -127,15 +131,16 @@ class OAuthManager(OAuth):
         Returns:
             User object if found, None otherwise
         """
-        if self.user_manager.is_db:
-            # Using FastHTML database
-            for user in self.user_manager.users():
-                if user.email == email:
-                    return user
-            return None
-        else:
-            # Using dictionary store
-            return self.user_manager.users.get(email)
+        match self.user_manager.storage:
+            case Storage.FAST_HTML: # Using FastHTML database
+                for user in self.user_manager.users():
+                    if user.email == email:
+                        return user
+                return None
+            case Storage.PEEWEE: # Using peewee database
+                return self.user_manager.get_or_none(email=email)
+            case _: # Using dictionary store
+                return self.user_manager.users.get(email)
     
     def _create_new_user(self, email):
         """
@@ -156,13 +161,19 @@ class OAuthManager(OAuth):
         
         # Create user with email verification already confirmed
         user = self.user_manager.create_user(email, random_password, validate=False)
-        
-        if self.user_manager.is_db:
-            # Mark user as confirmed
-            user.is_confirmed = True
-            self.user_manager.users.update(user)
-            return user.id
-        else:
-            # Mark user as confirmed
-            user["is_confirmed"] = True
-            return user["id"]
+
+        match self.user_manager.storage:
+            case Storage.FAST_HTML:
+                # Mark user as confirmed
+                user.is_confirmed = True
+                self.user_manager.users.update(user)
+                return user.id
+            case Storage.PEEWEE:
+                # Mark user as confirmed
+                user.is_confirmed = True
+                user.save()
+                return user.id
+            case _:
+                # Mark user as confirmed
+                user["is_confirmed"] = True
+                return user["id"]
